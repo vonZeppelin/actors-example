@@ -33,7 +33,7 @@ class ActorsTaskSuite(_sys: ActorSystem) extends TestKit(_sys)
         override val secret = 100
       }))
 
-      expectMsg(ReceiveFromNode(100))
+      expectMsgAllOf(SendToNode(1, 100), ReceiveFromNode(100))
     }
   }
 
@@ -43,7 +43,7 @@ class ActorsTaskSuite(_sys: ActorSystem) extends TestKit(_sys)
       override val secret = 10
     }))
 
-    expectNoMsg()
+    expectMsg(SendToNode(1, 10))
 
     EventFilter.info(message = "My number is 1 and I know the sum: 20", occurrences = 1) intercept {
       for (i <- 1 until n) {
@@ -72,6 +72,9 @@ class ActorsTaskSuite(_sys: ActorSystem) extends TestKit(_sys)
     val accNode = system.actorOf(Props(new Node(1, n) {
       override val secret = 0
     }))
+
+    expectMsg(SendToNode(1, 0))
+
     val nodes = for (i <- 2 to n) yield {
       system.actorOf(Props(new Node(i, n) {
         override val secret = secrets(i - 2)

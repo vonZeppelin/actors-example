@@ -18,40 +18,33 @@ object ActorsTask {
 class ActorsTask extends Actor {
   import ActorsTask._
 
+  context.system.eventStream.subscribe(self, classOf[Message])
+
   for (i <- 1 to total) {
     context.actorOf(Props(classOf[Node], i, total), "Node-" + i)
   }
 
-  def receive: Receive = Actor.emptyBehavior
+  def receive: Receive = {
+    case ReceiveFromNode(_) => context.stop(self)
+  }
 
 }
 
 /**
  * A Node actor, it knows its own id, total number of nodes and keeps a secret value. The Node actor with id = 1
- * becomes an "accumulator" that waits for (total - 1) messages from ordinary nodes, calculates the sum and sends the
- * result to others. An ordinary Node (id > 1) sends its secret to an accumulator Node on start and then just waits
+ * becomes an "accumulator" that waits for total messages from ordinary nodes and itself, calculates the sum and sends
+ * the result to others. An ordinary Node (id > 1) sends its secret to an accumulator Node on start and then just waits
  * for the result.
  */
 class Node(n: Int, total: Int) extends Actor with ActorLogging {
   import ActorsTask._
 
   val secret = Random.nextInt(Integer.MAX_VALUE / total)
-  val isAcc = n == 1
 
   // use EventStream instead of actor lookup by its name...
   context.system.eventStream.subscribe(self, classOf[Message])
 
-  override def preStart: Unit = {
-    if (isAcc) {
-      // what if there is only accumulator?
-      if (total == 1) {
-        self ! SendToNode(1, 0)
-      }
-    } else {
-      // ordinary node sends a secret to the accumulator
-      context.system.eventStream.publish(SendToNode(1, secret))
-    }
-  }
+  override def preStart: Unit = context.system.eventStream.publish(SendToNode(1, secret))
 
   def ordinary: Receive = {
     case ReceiveFromNode(sum) => {
@@ -67,12 +60,10 @@ class Node(n: Int, total: Int) extends Actor with ActorLogging {
       } else {
         log.info("My number is {} and I know the sum: {}", n, newSum)
         context.system.eventStream.publish(ReceiveFromNode(newSum))
-        // stop the Master actor
-        context.parent ! PoisonPill
       }
     }
   }
 
-  def receive = if (isAcc) accumulator(secret, total - 1) else ordinary
+  def receive = if (n == 1) accumulator(0, total) else ordinary
 
 }
