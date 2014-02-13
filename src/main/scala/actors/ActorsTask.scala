@@ -5,11 +5,19 @@ import scala.util.Random
 
 
 object ActorsTask {
-  val total = 5
-  trait Message
+  val total = 10
 
+  sealed trait Message
   case class SendToNode(target: Int, message: Int) extends Message
   case class ReceiveFromNode(message: Int) extends Message
+  object Done extends Message
+
+  // should return tuple, but returns Seq for convenience
+  def myChildren(n: Int, total: Int): Seq[Option[Int]] = {
+    val left = 2 * n
+    val right = left + 1
+    List(if (left <= total) Some(left) else None, if (right <= total) Some(right) else None)
+  }
 }
 
 /**
@@ -18,52 +26,62 @@ object ActorsTask {
 class ActorsTask extends Actor {
   import ActorsTask._
 
-  context.system.eventStream.subscribe(self, classOf[Message])
-
   for (i <- 1 to total) {
     context.actorOf(Props(classOf[Node], i, total), "Node-" + i)
   }
 
-  def receive: Receive = {
-    case ReceiveFromNode(_) => context.stop(self)
+  def waitForCompletion(n: Int): Receive = {
+    case Done => if (n > 1) context.become(waitForCompletion(n - 1)) else context.stop(self)
   }
 
+  def receive: Receive = waitForCompletion(total)
 }
 
 /**
- * A Node actor, it knows its own id, total number of nodes and keeps a secret value. The Node actor with id = 1
- * becomes an "accumulator" that waits for total messages from ordinary nodes and itself, calculates the sum and sends
- * the result to others. An ordinary Node (id > 1) sends its secret to an accumulator Node on start and then just waits
- * for the result.
+ * A Node actor, it knows its own id, total number of nodes and keeps a secret value. Nodes are organized into a
+ * "logical" binary tree: the node with id = 1 is a root with others being ordinary nodes and leaves, a node with
+ * id = x has children with ids = (2 * x, 2 * x + 1) and a parent with id = floor(x / 2). The idea is to aggregate
+ * the sum starting from leaves moving towards the root and then propagate the result back from the root to the leaves.
  */
 class Node(n: Int, total: Int) extends Actor with ActorLogging {
   import ActorsTask._
 
   val secret = Random.nextInt(Integer.MAX_VALUE / total)
+  val children = myChildren(n, total)
 
-  // use EventStream instead of actor lookup by its name...
-  context.system.eventStream.subscribe(self, classOf[Message])
+  override def preStart: Unit = self ! SendToNode(n, secret)
 
-  override def preStart: Unit = context.system.eventStream.publish(SendToNode(1, secret))
+  def sendToNode(node: Int, msg: Message): Unit = context.actorSelection("../Node-" + node) ! msg
 
-  def ordinary: Receive = {
-    case ReceiveFromNode(sum) => {
-      log.info("My number is {} and I know the sum: {}", n, sum)
+  def printAndPropagate(sum: Int) {
+    log.info("My number is {} and I know the sum: {}", n, sum)
+    // propagate sacred knowledge to my children
+    children foreach {
+      case Some(node) => sendToNode(node, ReceiveFromNode(sum))
+      case _ =>
     }
+    context.parent ! Done
   }
 
-  def accumulator(sum: Int, toReceive: Int): Receive = {
+  def waitForChildren(subtreeSum: Int, remaining: Int): Receive = {
     case SendToNode(target, message) if target == n => {
-      val newSum = sum + message
-      if (toReceive > 1) {
-        context.become(accumulator(newSum, toReceive - 1))
+      val newSum = subtreeSum + message
+      if (remaining > 1) {
+        context.become(waitForChildren(newSum, remaining - 1))
       } else {
-        log.info("My number is {} and I know the sum: {}", n, newSum)
-        context.system.eventStream.publish(ReceiveFromNode(newSum))
+        if (n == 1) { // I'm the root and aggregation is complete
+          printAndPropagate(newSum)
+        } else { // send the sum of the subtree to a parent node
+          sendToNode(n / 2, SendToNode(n / 2, newSum))
+          context.become(waitForParent)
+        }
       }
     }
   }
 
-  def receive = if (n == 1) accumulator(0, total) else ordinary
+  def waitForParent: Receive = {
+    case ReceiveFromNode(sum) => printAndPropagate(sum)
+  }
 
+  def receive = waitForChildren(0, (children count (_.isDefined)) + 1)
 }

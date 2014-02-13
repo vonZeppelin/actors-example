@@ -12,10 +12,16 @@ import akka.testkit._
 
 
 class ActorsTaskSuite(_sys: ActorSystem) extends TestKit(_sys)
-    with FunSuite
-    with BeforeAndAfterAll
-    with ImplicitSender
-    with OneInstancePerTest {
+  with FunSuite
+  with BeforeAndAfterAll
+  with ImplicitSender
+  with OneInstancePerTest {
+
+  object ForwardingActor extends Actor {
+    def receive = {
+      case x => testActor forward x
+    }
+  }
 
   import actors.ActorsTask._
 
@@ -25,68 +31,74 @@ class ActorsTaskSuite(_sys: ActorSystem) extends TestKit(_sys)
 
   override def afterAll: Unit = system.shutdown()
 
-  system.eventStream.subscribe(self, classOf[Message])
-
-  test("an accumulator node when it's alone") {
+  test("a root node when it's alone") {
     EventFilter.info(message = "My number is 1 and I know the sum: 100", occurrences = 1) intercept {
-      val accNode = system.actorOf(Props(new Node(1, 1) {
+      val root = system.actorOf(Props(new Node(1, 1) {
         override val secret = 100
       }))
-
-      expectMsgAllOf(SendToNode(1, 100), ReceiveFromNode(100))
     }
   }
 
-  test("an accumulator node when it's not alone") {
-    val n = 5
-    val accNode = system.actorOf(Props(new Node(1, n) {
+  test("a node with 1 child") {
+    val n = 8
+    val parent = system.actorOf(Props(ForwardingActor), "Node-2")
+    val node = system.actorOf(Props(new Node(4, n) {
       override val secret = 10
     }))
 
-    expectMsg(SendToNode(1, 10))
+    expectNoMsg()
+    node ! SendToNode(4, 15)
+    expectMsg(SendToNode(2, 25))
 
-    EventFilter.info(message = "My number is 1 and I know the sum: 20", occurrences = 1) intercept {
-      for (i <- 1 until n) {
-        accNode ! SendToNode(1, i)
-      }
-
-      expectMsg(ReceiveFromNode(10 + (1 until n).sum))
+    EventFilter.info(message = "My number is 4 and I know the sum: 30", occurrences = 1) intercept {
+      node ! ReceiveFromNode(30)
     }
   }
 
-  test("an ordinary node") {
-    val node = system.actorOf(Props(new Node(5, 5) {
+  test("a node with 2 children") {
+    val n = 6
+    val parent = system.actorOf(Props(ForwardingActor), "Node-1")
+    val node = system.actorOf(Props(new Node(2, n) {
       override val secret = 50
     }))
 
-    expectMsg(SendToNode(1, 50))
+    expectNoMsg()
+    node ! SendToNode(2, 100)
+    node ! SendToNode(2, 200)
+    expectMsg(SendToNode(1, 350))
 
-    EventFilter.info(message = "My number is 5 and I know the sum: 60", occurrences = 1) intercept {
-      node ! ReceiveFromNode(50 + 10)
+    EventFilter.info(message = "My number is 2 and I know the sum: 355", occurrences = 1) intercept {
+      node ! ReceiveFromNode(355)
+    }
+  }
+
+  test("a leaf") {
+    val n = 6
+    val parent = system.actorOf(Props(ForwardingActor), "Node-2")
+    val node = system.actorOf(Props(new Node(5, n) {
+      override val secret = 25
+    }))
+
+    expectMsg(SendToNode(2, 25))
+
+    EventFilter.info(message = "My number is 5 and I know the sum: 5", occurrences = 1) intercept {
+      node ! ReceiveFromNode(5)
     }
   }
 
   test("all together now") {
     val n = 100
     val secrets = Vector.fill(n - 1)(Random.nextInt(Int.MaxValue / n))
-    val accNode = system.actorOf(Props(new Node(1, n) {
-      override val secret = 0
-    }))
-
-    expectMsg(SendToNode(1, 0))
-
+    val root = system.actorOf(Props(ForwardingActor), "Node-1")
     val nodes = for (i <- 2 to n) yield {
       system.actorOf(Props(new Node(i, n) {
         override val secret = secrets(i - 2)
-      }))
+      }), "Node-" + i)
     }
 
-    if (!receiveN(n - 1).forall {
-      case SendToNode(1, x) => secrets contains x
-      case _ => false
-    }) fail
-
-    expectMsg(15.seconds, ReceiveFromNode(secrets.sum))
+    val result = receiveN(2).foldLeft(0) {
+      case (acc, SendToNode(1, sum)) => acc + sum
+    }
+    if (result != secrets.sum) fail
   }
-
 }
